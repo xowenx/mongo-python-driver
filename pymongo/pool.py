@@ -168,8 +168,8 @@ class Pool:
 
         if use_greenlets and not thread_util.have_gevent:
             raise ConfigurationError(
-                "The Gevent module is not available. "
-                "Install the gevent package from PyPI."
+                "The Gevent/Eventlet module is not available. "
+                "Install the gevent/eventlet package from PyPI."
             )
 
         self._ident = thread_util.create_ident(use_greenlets)

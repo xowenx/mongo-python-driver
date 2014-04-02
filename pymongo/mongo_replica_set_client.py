@@ -383,11 +383,21 @@ class MonitorThread(threading.Thread, Monitor):
 
 have_gevent = False
 try:
-    from gevent import Greenlet
-    from gevent.event import Event
+    try:
+        from gevent import Greenlet
+    except ImportError:
+        from eventlet.greenthread import GreenThread as Greenlet
+    try:
+        from gevent.event import Event
+    except ImportError:
+        from eventlet.event import Event
 
     # Used by ReplicaSetConnection
-    from gevent.local import local as gevent_local
+    try:
+        from gevent.local import local as gevent_local
+    except ImportError:
+        from eventlet.corolocal import local as gevent_local
+
     have_gevent = True
 
     class MonitorGreenlet(Monitor, Greenlet):
@@ -396,7 +406,11 @@ try:
         def __init__(self, rsc):
             self.monitor_greenlet_alive = False
             Monitor.__init__(self, rsc, Event)
-            Greenlet.__init__(self)
+            try:
+                Greenlet.__init__(self)
+            except:
+                from eventlet.hubs import get_hub
+                Greenlet.__init__(self, parent=get_hub())
 
         def start_sync(self):
             self.monitor_greenlet_alive = True
@@ -618,8 +632,8 @@ class MongoReplicaSetClient(common.BaseObject):
         self.__use_greenlets = self.__opts.get('use_greenlets', False)
         if self.__use_greenlets and not have_gevent:
             raise ConfigurationError(
-                "The gevent module is not available. "
-                "Install the gevent package from PyPI.")
+                "The gevent/eventlet module is not available. "
+                "Install the gevent/eventlet package from PyPI.")
 
         self.__rs_state = RSState(self.__make_threadlocal(), initial=True)
 

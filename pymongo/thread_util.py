@@ -30,10 +30,20 @@ try:
         # gevent-1.0rc2 and later.
         from gevent.lock import BoundedSemaphore as GeventBoundedSemaphore
     except ImportError:
-        from gevent.coros import BoundedSemaphore as GeventBoundedSemaphore
+        try:
+            from gevent.coros import BoundedSemaphore as GeventBoundedSemaphore
+        except ImportError:
+            from eventlet.coros import BoundedSemaphore as GeventBoundedSemaphore
 
-    from gevent.greenlet import SpawnedLink
-    from gevent.event import Event as GeventEvent
+    try:
+        from gevent.greenlet import SpawnedLink
+    except ImportError:
+        pass
+
+    try:
+        from gevent.event import Event as GeventEvent
+    except ImportError:
+        from eventlet.event import Event as GeventEvent
 
 except ImportError:
     have_gevent = False
@@ -115,17 +125,20 @@ class GreenletIdent(Ident):
     def get(self):
         return id(greenlet.getcurrent())
 
-    def watch(self, callback):
+    def watch(self, callback, *args, **kwargs):
         current = greenlet.getcurrent()
         tid = self.get()
 
-        if hasattr(current, 'link'):
+        if hasattr(current, 'rawlink'):
             # This is a Gevent Greenlet (capital G), which inherits from
             # greenlet and provides a 'link' method to detect when the
             # Greenlet exits.
             link = SpawnedLink(callback)
             current.rawlink(link)
             self._refs[tid] = link
+        elif hasattr(current, 'link'):
+            current.link(callback)
+            self._refs[tid] = callback
         else:
             # This is a non-Gevent greenlet (small g), or it's the main
             # greenlet.
@@ -198,7 +211,11 @@ class Future(object):
 
     def set_result(self, result):
         self._result = result
-        self._event.set()
+
+        if hasattr(self._event, 'set'):
+            self._event.set()
+        else:
+            self._event.send()  # make compatible with Eventlet
 
     def set_exception(self, exc):
         if hasattr(exc, 'with_traceback'):
@@ -206,7 +223,11 @@ class Future(object):
             self._exception = exc.with_traceback(None)
         else:
             self._exception = exc
-        self._event.set()
+
+        if hasattr(self._event, 'set'):
+            self._event.set()
+        else:
+            self._event.send()  # make compatible with Eventlet
 
     def result(self):
         self._event.wait()
