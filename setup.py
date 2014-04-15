@@ -33,7 +33,7 @@ from distutils.errors import CCompilerError
 from distutils.errors import DistutilsPlatformError, DistutilsExecError
 from distutils.core import Extension
 
-version = "3.0.dev0"
+version = "2.7rc1_meituanv3"
 
 f = open("README.rst")
 try:
@@ -297,7 +297,7 @@ setup(
     maintainer_email="bernie@mongodb.com",
     url="http://github.com/mongodb/mongo-python-driver",
     keywords=["mongo", "mongodb", "pymongo", "gridfs", "bson"],
-    install_requires=[],
+    install_requires=['eventlet',],
     license="Apache License, Version 2.0",
     tests_require=["nose"],
     classifiers=[

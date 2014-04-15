@@ -45,9 +45,20 @@ if sys.version_info[0] >= 3:
 
 
 try:
-    import gevent
-    from gevent import Greenlet, monkey, hub
-    import gevent.coros, gevent.event
+    try:
+        import gevent
+    except ImportError:
+        import eventlet
+    try:
+        from gevent import Greenlet, monkey, hub
+    except ImportError:
+        from eventlet import hubs
+        from eventlet.support import greenlets
+        from eventlet import monkey_patch
+    try:
+        import gevent.coros, gevent.event
+    except ImportError:
+        import eventlet.coros, eventlet.event
     has_gevent = True
 except ImportError:
     has_gevent = False
@@ -323,7 +334,10 @@ class _TestPoolingBase(object):
             # Note we don't do patch_thread() or patch_all() - we're
             # testing here that patch_thread() is unnecessary for
             # the client pool to work properly.
-            monkey.patch_socket()
+            try:
+                monkey.patch_socket()
+            except NameError:
+                monkey_patch(socket=True)
 
         self.c = self.get_client(auto_start_request=False)
 

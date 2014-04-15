@@ -27,8 +27,13 @@ from nose.plugins.skip import SkipTest
 from pymongo import thread_util
 if thread_util.have_gevent:
     import greenlet         # Plain greenlets.
-    import gevent.greenlet  # Gevent's enhanced Greenlets.
-    import gevent.hub
+    try:
+        # import gevent.greenlet.Greenlet as greenlet
+        from gevent.greenlet import Greenlet as Greenlet  # Gevent's enhanced Greenlets.
+        import gevent.hub as hub
+    except ImportError:
+        from eventlet.greenthread import GreenThread as Greenlet
+        import eventlet.hubs as hub
 
 from test.utils import looplet, my_partial, RendezvousThread
 
@@ -173,21 +178,29 @@ class TestGreenletIdent(unittest.TestCase):
             callback_ran[0] = True
 
         ident = thread_util.create_ident(use_greenlets=True)
+        the_hub = hub.get_hub()
 
         def watch_and_unwatch():
             ident.watch(on_greenlet_died)
             ident.unwatch(ident.get())
 
-        g = gevent.greenlet.Greenlet(run=watch_and_unwatch)
-        g.start()
-        g.join(10)
-        the_hub = gevent.hub.get_hub()
+        if hasattr(Greenlet, 'run'):
+            g = Greenlet(run=watch_and_unwatch)
+            g.start()
+        else:
+            g = Greenlet(the_hub.greenlet)
+            the_hub.schedule_call_global(0, g.switch, watch_and_unwatch)
+
+        if hasattr(g, 'join'):
+            g.join(10)
         if hasattr(the_hub, 'join'):
             # Gevent 1.0
             the_hub.join()
-        else:
-            # Gevent 0.13 and less
+        elif hasattr(the_hub, 'shutdown'):
             the_hub.shutdown()
+        elif hasattr(the_hub, 'wait'):
+            # Gevent 0.13 and less
+            the_hub.wait()
 
         self.assertTrue(g.successful())
 

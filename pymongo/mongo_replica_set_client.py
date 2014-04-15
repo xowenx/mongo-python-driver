@@ -31,6 +31,7 @@ attribute-style access:
   Database(MongoReplicaSetClient([u'...', u'...']), u'test_database')
 """
 
+import sys
 import atexit
 import datetime
 import socket
@@ -60,14 +61,25 @@ from pymongo.errors import (AutoReconnect,
                             InvalidOperation)
 from pymongo.thread_util import DummyLock
 
+PY3 = sys.version_info[0] == 3
+
+if PY3:
+    base_string = (str, bytes)
+    int_type = int
+else:
+    base_string = basestring
+    int_type = (int, long)
+
 EMPTY = b("")
 MAX_RETRY = 3
 
 MONITORS = set()
 
+
 def register_monitor(monitor):
     ref = weakref.ref(monitor, _on_monitor_deleted)
     MONITORS.add(ref)
+
 
 def _on_monitor_deleted(ref):
     """Remove the weakreference from the set
@@ -75,6 +87,7 @@ def _on_monitor_deleted(ref):
     care about keeping track of it
     """
     MONITORS.remove(ref)
+
 
 def shutdown_monitors():
     # Keep a local copy of MONITORS as
@@ -87,6 +100,7 @@ def shutdown_monitors():
             monitor.shutdown()
             monitor.join()
 atexit.register(shutdown_monitors)
+
 
 def _partition_node(node):
     """Split a host:port string returned from mongod/s into
@@ -303,6 +317,7 @@ class Monitor(object):
 
     def __init__(self, rsc, event_class):
         self.rsc = weakref.proxy(rsc, self.shutdown)
+        self.event_class = event_class
         self.timer = event_class()
         self.refreshed = event_class()
         self.started_event = event_class()
@@ -316,13 +331,21 @@ class Monitor(object):
         # process when it's really dead:
         # http://bugs.python.org/issue18418.
         self.start()  # Implemented in subclasses.
-        self.started_event.wait(5)
+        try:
+            self.started_event.wait(5)
+        except TypeError:
+            from eventlet import Timeout
+            with Timeout(5):
+                self.started_event.wait()
 
     def shutdown(self, dummy=None):
         """Signal the monitor to shutdown.
         """
         self.stopped = True
-        self.timer.set()
+        if hasattr(self.timer, "set"):
+            self.timer.set()
+        else:
+            self.timer.send()
 
     def schedule_refresh(self):
         """Refresh immediately
@@ -330,30 +353,53 @@ class Monitor(object):
         if not self.isAlive():
             # Checks in RS client should prevent this.
             raise AssertionError("schedule_refresh called with dead monitor")
-        self.refreshed.clear()
-        self.timer.set()
+
+        if hasattr(self.refreshed, "clear"):
+            self.refreshed.clear()
+        else:
+            self.refreshed = self.event_class()
+
+        if hasattr(self.timer, "set"):
+            self.timer.set()
+        else:
+            self.timer.send()
 
     def wait_for_refresh(self, timeout_seconds):
         """Block until a scheduled refresh completes
         """
-        self.refreshed.wait(timeout_seconds)
+        try:
+            self.refreshed.wait(timeout_seconds)
+        except TypeError:
+            from eventlet import Timeout
+            with Timeout(timeout_seconds):
+                self.refreshed.wait()
 
     def monitor(self):
         """Run until the RSC is collected or an
         unexpected error occurs.
         """
-        self.started_event.set()
+        if hasattr(self.started_event, "set"):
+            self.started_event.set()
+        else:
+            self.started_event.send()
+
         while True:
             self.timer.wait(Monitor._refresh_interval)
             if self.stopped:
                 break
-            self.timer.clear()
+            if hasattr(self.timer, "clear"):
+                self.timer.clear()
+            else:
+                self.timer = self.event_class()
 
             try:
                 try:
                     self.rsc.refresh()
                 finally:
-                    self.refreshed.set()
+                    if hasattr(self.refreshed, "set"):
+                        self.refreshed.set()
+                    else:
+                        self.refreshed.send()
             except AutoReconnect:
                 pass
 
@@ -624,9 +670,15 @@ class MongoReplicaSetClient(common.BaseObject):
         self.pool_class = kwargs.pop('_pool_class', pool.Pool)
         self.__monitor_class = kwargs.pop('_monitor_class', None)
 
-        for option, value in kwargs.iteritems():
-            option, value = common.validate(option, value)
-            self.__opts[option] = value
+        if PY3:
+            for option, value in kwargs.items():
+                option, value = common.validate(option, value)
+                self.__opts[option] = value
+        else:
+            for option, value in kwargs.iteritems():
+                option, value = common.validate(option, value)
+                self.__opts[option] = value
+
         self.__opts.update(options)
 
         self.__use_greenlets = self.__opts.get('use_greenlets', False)
@@ -687,7 +739,7 @@ class MongoReplicaSetClient(common.BaseObject):
         if _connect:
             try:
                 self.refresh(initial=True)
-            except AutoReconnect, e:
+            except AutoReconnect as e:
                 # ConnectionFailure makes more sense here than AutoReconnect
                 raise ConnectionFailure(str(e))
 
@@ -698,14 +750,22 @@ class MongoReplicaSetClient(common.BaseObject):
                 or self.__default_database_name
                 or 'admin')
 
-            credentials = auth._build_credentials_tuple(mechanism,
-                                                        source,
-                                                        unicode(username),
-                                                        unicode(password),
-                                                        options)
+            if PY3:
+                credentials = auth._build_credentials_tuple(mechanism,
+                                                            source,
+                                                            username,
+                                                            password,
+                                                            options)
+
+            else:
+                credentials = auth._build_credentials_tuple(mechanism,
+                                                            source,
+                                                            unicode(username),
+                                                            unicode(password),
+                                                            options)
             try:
                 self._cache_credentials(source, credentials, _connect)
-            except OperationFailure, exc:
+            except OperationFailure as exc:
                 raise ConfigurationError(str(exc))
 
         # Start the monitor after we know the configuration is correct.
@@ -827,7 +887,11 @@ class MongoReplicaSetClient(common.BaseObject):
         """Authenticate using cached database credentials.
         """
         if self.__auth_credentials or sock_info.authset:
-            cached = set(self.__auth_credentials.itervalues())
+
+            if PY3:
+                cached = set(self.__auth_credentials.values())
+            else:
+                cached = set(self.__auth_credentials.itervalues())
 
             authset = sock_info.authset.copy()
 
@@ -1118,7 +1182,7 @@ class MongoReplicaSetClient(common.BaseObject):
         rs_state = self.__rs_state
         try:
             self.__rs_state = self.__create_rs_state(rs_state, initial)
-        except ConfigurationError, e:
+        except ConfigurationError as e:
             self.__rs_state = rs_state.clone_with_error(e)
             raise
 
@@ -1184,7 +1248,7 @@ class MongoReplicaSetClient(common.BaseObject):
                     if response['ismaster']:
                         writer = node
 
-            except (ConnectionFailure, socket.error), why:
+            except (ConnectionFailure, socket.error) as why:
                 if member:
                     member.pool.discard_socket(sock_info)
                 errors.append("%s:%d: %s" % (node[0], node[1], str(why)))
@@ -1256,7 +1320,10 @@ class MongoReplicaSetClient(common.BaseObject):
         if writer:
             response = members[writer].ismaster_response
         elif members:
-            response = members.values()[0].ismaster_response
+            if PY3:
+                response = list(members.values())[0].ismaster_response
+            else:
+                response = members.values()[0].ismaster_response
         else:
             response = {}
 
@@ -1523,7 +1590,7 @@ class MongoReplicaSetClient(common.BaseObject):
                 return rv
             except OperationFailure:
                 raise
-            except(ConnectionFailure, socket.error), why:
+            except(ConnectionFailure, socket.error) as why:
                 member.pool.discard_socket(sock_info)
                 if _connection_to_use in (None, -1):
                     self.disconnect()
@@ -1563,11 +1630,11 @@ class MongoReplicaSetClient(common.BaseObject):
         """
         try:
             return self.__send_and_receive(member, msg, **kwargs)
-        except socket.timeout, e:
+        except socket.timeout as e:
             # Could be one slow query, don't refresh.
             host, port = member.host
             raise AutoReconnect("%s:%d: %s" % (host, port, e))
-        except (socket.error, ConnectionFailure), why:
+        except (socket.error, ConnectionFailure) as why:
             # Try to replace our RSState with a clone where this member is
             # marked "down", to reduce exceptions on other threads, or repeated
             # exceptions on this thread. We accept that there's a race
@@ -1643,7 +1710,7 @@ class MongoReplicaSetClient(common.BaseObject):
                 return (
                     pinned_member.host,
                     self.__try_read(pinned_member, msg, **kwargs))
-            except AutoReconnect, why:
+            except AutoReconnect as why:
                 if pref == ReadPreference.PRIMARY:
                     self.disconnect()
                     raise
@@ -1675,7 +1742,7 @@ class MongoReplicaSetClient(common.BaseObject):
                     # unless read preference changes
                     rs_state.pin_host(member.host, pref)
                 return member.host, response
-            except AutoReconnect, why:
+            except AutoReconnect as why:
                 if pref == ReadPreference.PRIMARY:
                     raise
 
@@ -1815,7 +1882,8 @@ class MongoReplicaSetClient(common.BaseObject):
         :Parameters:
           - `cursor_id`: id of cursor to close
         """
-        if not isinstance(cursor_id, (int, long)):
+
+        if not isinstance(cursor_id, int_type):
             raise TypeError("cursor_id must be an instance of (int, long)")
 
         self._send_message(message.kill_cursors([cursor_id]),
@@ -1847,9 +1915,9 @@ class MongoReplicaSetClient(common.BaseObject):
         if isinstance(name, database.Database):
             name = name.name
 
-        if not isinstance(name, basestring):
+        if not isinstance(name, base_string):
             raise TypeError("name_or_database must be an instance of "
-                            "%s or Database" % (basestring.__name__,))
+                            "%s or Database" % "basestring")
 
         self._purge_index(name)
         self[name].command("dropDatabase")
@@ -1879,12 +1947,12 @@ class MongoReplicaSetClient(common.BaseObject):
         .. note:: Specifying `username` and `password` requires server
            version **>= 1.3.3+**.
         """
-        if not isinstance(from_name, basestring):
+        if not isinstance(from_name, base_string):
             raise TypeError("from_name must be an instance "
-                            "of %s" % (basestring.__name__,))
-        if not isinstance(to_name, basestring):
+                            "of %s" % (base_string.__name__,))
+        if not isinstance(to_name, base_string):
             raise TypeError("to_name must be an instance "
-                            "of %s" % (basestring.__name__,))
+                            "of %s" % (base_string.__name__,))
 
         database._check_name(to_name)
 
